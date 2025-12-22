@@ -1,12 +1,6 @@
 import { Injectable } from '@angular/core'
 import { ConfigService } from 'tabby-core'
 import { XTermFrontend } from 'tabby-terminal'
-import {
-    detectMainPrompt,
-    stripContinuationPrompt,
-    detectShellType,
-    ShellType,
-} from './promptDetector'
 
 /**
  * Result of command extraction
@@ -20,45 +14,48 @@ export interface ExtractionResult {
     startLine: number
     /** Ending line in the buffer */
     endLine: number
-    /** Detected shell type */
-    shellType: ShellType
 }
 
 /**
- * Command boundaries detected by buffer scanning
+ * Cursor position in the terminal buffer
+ */
+interface CursorPosition {
+    x: number
+    /** Absolute Y position (baseY + cursorY) */
+    y: number
+}
+
+/**
+ * Command boundaries detected by readline probing
  */
 interface CommandBoundaries {
-    /** Y position (absolute) where command starts */
-    startY: number
-    /** X position where command starts (after prompt) */
-    startX: number
-    /** Y position (absolute) where command ends */
-    endY: number
-    /** X position where command ends */
-    endX: number
+    start: CursorPosition
+    end: CursorPosition
 }
 
 /**
- * Service for extracting commands from the terminal buffer using keyboard-based detection.
- * This approach doesn't require shell integration (OSC 133) and works with SSH sessions.
+ * Service for extracting commands from the terminal buffer using readline shortcuts.
+ * Uses Ctrl+A/Ctrl+E to detect command boundaries - works with any prompt style.
  */
 @Injectable()
 export class CommandExtractionService {
-    /** Timeout for Ctrl+A probe in milliseconds (increased for slower shells/SSH) */
-    private readonly PROBE_TIMEOUT = 200
+    /** Timeout for readline probe in milliseconds */
+    private readonly PROBE_TIMEOUT = 300
+
+    /** Interval between cursor position checks */
+    private readonly CHECK_INTERVAL = 15
+
+    /** Number of stable readings required before accepting position */
+    private readonly STABLE_READINGS = 2
 
     /** Maximum lines to scan backward for multi-line commands */
-    private readonly MAX_SCAN_LINES = 100
+    private readonly MAX_SCAN_LINES = 50
 
     constructor(private config: ConfigService) { }
 
     /**
      * Extract the current command from the terminal buffer.
-     * Uses a universal approach: scan backward for prompt, scan forward for end.
-     *
-     * @param frontend The xterm frontend instance
-     * @param sendInput Function to send input to the shell
-     * @returns Extraction result or null if no command found
+     * Uses Ctrl+A and Ctrl+E to find command boundaries via readline.
      */
     async extractCommand(
         frontend: XTermFrontend,
@@ -73,109 +70,221 @@ export class CommandExtractionService {
             return null
         }
 
-        // Capture current cursor position
-        const cursorY = buffer.baseY + buffer.cursorY
-        const cursorX = buffer.cursorX
-        const currentLineText = this.getLineText(buffer, cursorY)
+        // Get original cursor position
+        const originalPos = this.getCursorPosition(buffer)
+        console.log('[CommandExtraction] Original cursor:', originalPos)
 
-        console.log('[CommandExtraction] Cursor position:', { x: cursorX, y: cursorY })
-        console.log('[CommandExtraction] Current line:', JSON.stringify(currentLineText))
-
-        // Use Ctrl+A probe to find command start on current line (helps detect prompt position)
-        const probeStartX = await this.probeCtrlA(frontend, sendInput, cursorX)
-        console.log('[CommandExtraction] Ctrl+A probe startX:', probeStartX)
-
-        // Find command boundaries by scanning the buffer
-        const boundaries = this.findCommandBoundaries(buffer, cursorY, cursorX, probeStartX)
+        // Probe command boundaries using readline shortcuts
+        const boundaries = await this.probeCommandBoundaries(frontend, sendInput, originalPos)
 
         if (!boundaries) {
-            console.log('[CommandExtraction] No command boundaries found')
+            console.log('[CommandExtraction] Failed to detect command boundaries')
             return null
         }
 
-        console.log('[CommandExtraction] Boundaries:', boundaries)
+        console.log('[CommandExtraction] Initial boundaries:', boundaries)
 
-        // Extract command text from the boundaries
-        const result = this.extractFromBoundaries(buffer, boundaries)
+        // Expand boundaries backward to include multi-line command continuations
+        const expandedBoundaries = this.expandForMultiLine(buffer, boundaries)
+        console.log('[CommandExtraction] Expanded boundaries:', expandedBoundaries)
 
+        // Validate boundaries
+        if (expandedBoundaries.start.y > expandedBoundaries.end.y ||
+            (expandedBoundaries.start.y === expandedBoundaries.end.y &&
+             expandedBoundaries.start.x >= expandedBoundaries.end.x)) {
+            console.log('[CommandExtraction] No command (empty boundaries)')
+            return null
+        }
+
+        // Extract command text from buffer
+        const result = this.extractFromBoundaries(buffer, expandedBoundaries)
         console.log('[CommandExtraction] Result:', result)
+
         return result
     }
 
     /**
-     * Find command boundaries by scanning backward for prompt and forward for end.
+     * Probe command boundaries using Ctrl+A (start) and Ctrl+E (end).
      */
-    private findCommandBoundaries(
+    private async probeCommandBoundaries(
+        frontend: XTermFrontend,
+        sendInput: (data: string) => void,
+        originalPos: CursorPosition,
+    ): Promise<CommandBoundaries | null> {
+        const buffer = frontend.xterm.buffer.active
+
+        // Step 1: Send Ctrl+A to move to command start
+        const startPos = await this.probeCursorMove(
+            buffer,
+            sendInput,
+            '\x01', // Ctrl+A
+            originalPos,
+        )
+
+        if (!startPos) {
+            console.log('[CommandExtraction] Ctrl+A probe failed')
+        }
+
+        const commandStart = startPos || originalPos
+
+        // Step 2: Send Ctrl+E to move to command end
+        const endPos = await this.probeCursorMove(
+            buffer,
+            sendInput,
+            '\x05', // Ctrl+E
+            commandStart,
+        )
+
+        if (!endPos) {
+            console.log('[CommandExtraction] Ctrl+E probe failed')
+        }
+
+        const commandEnd = endPos || this.getCursorPosition(buffer)
+
+        return {
+            start: commandStart,
+            end: commandEnd,
+        }
+    }
+
+    /**
+     * Expand boundaries backward to include multi-line command continuations.
+     * Looks for lines ending with \ (line continuation character).
+     */
+    private expandForMultiLine(buffer: any, boundaries: CommandBoundaries): CommandBoundaries {
+        let startY = boundaries.start.y
+        let startX = boundaries.start.x
+
+        // Scan backward from the start line to find continuation lines
+        for (let y = boundaries.start.y - 1; y >= Math.max(0, boundaries.start.y - this.MAX_SCAN_LINES); y--) {
+            const lineText = this.getLineText(buffer, y)
+            const trimmedLine = lineText.trimEnd()
+
+            // Check if this line ends with \ (line continuation)
+            if (trimmedLine.endsWith('\\')) {
+                console.log(`[CommandExtraction] Found continuation at y=${y}: "${trimmedLine.substring(0, 50)}"`)
+
+                // Find the start of the command on this line
+                // Look for prompt indicators (❯, $, %, >, etc.) at the start
+                const promptMatch = this.findPromptEnd(lineText)
+                if (promptMatch !== null) {
+                    startY = y
+                    startX = promptMatch
+                    console.log(`[CommandExtraction] Command starts at y=${y}, x=${startX}`)
+                } else {
+                    // No prompt found, assume it's a continuation line starting at 0
+                    startY = y
+                    startX = 0
+                }
+            } else {
+                // Line doesn't end with \, stop scanning
+                break
+            }
+        }
+
+        return {
+            start: { x: startX, y: startY },
+            end: boundaries.end,
+        }
+    }
+
+    /**
+     * Find where the prompt ends on a line.
+     * Returns the character position after the prompt, or null if no prompt found.
+     */
+    private findPromptEnd(line: string): number | null {
+        // Common prompt patterns - look for the prompt character followed by space
+        const promptPatterns = [
+            /^.*?[❯›➜➤⟩»$#%>]\s+/,  // Common prompt terminators
+            /^.*?[λ∴⊙⟡❮❭]\s+/,       // Starship/pure symbols
+        ]
+
+        for (const pattern of promptPatterns) {
+            const match = line.match(pattern)
+            if (match) {
+                return match[0].length
+            }
+        }
+
+        return null
+    }
+
+    /**
+     * Simple delay helper.
+     */
+    private delay(ms: number): Promise<void> {
+        return new Promise(resolve => setTimeout(resolve, ms))
+    }
+
+    /**
+     * Send a control character and wait for cursor to move.
+     * Returns the new position, or null if cursor didn't move.
+     */
+    private async probeCursorMove(
         buffer: any,
-        cursorY: number,
-        cursorX: number,
-        probeStartX: number | null,
-    ): CommandBoundaries | null {
-        // Get custom prompt pattern from config (if set)
-        const customPattern = this.config.store.commandEditor?.customPromptPattern || undefined
+        sendInput: (data: string) => void,
+        controlChar: string,
+        currentPos: CursorPosition,
+    ): Promise<CursorPosition | null> {
+        return new Promise<CursorPosition | null>(resolve => {
+            let resolved = false
+            let stableCount = 0
+            let lastPos: CursorPosition | null = null
 
-        if (customPattern) {
-            console.log('[CommandExtraction] Using custom prompt pattern:', customPattern)
-        }
+            const timeout = setTimeout(() => {
+                if (!resolved) {
+                    resolved = true
+                    // Return current position if different from start, else null
+                    const finalPos = this.getCursorPosition(buffer)
+                    if (finalPos.x !== currentPos.x || finalPos.y !== currentPos.y) {
+                        resolve(finalPos)
+                    } else {
+                        resolve(null)
+                    }
+                }
+            }, this.PROBE_TIMEOUT)
 
-        // Scan BACKWARD to find the line with the main prompt
-        let startY = cursorY
-        let startX = probeStartX ?? 0
+            const checkCursor = () => {
+                if (resolved) return
 
-        for (let y = cursorY; y >= Math.max(0, cursorY - this.MAX_SCAN_LINES); y--) {
-            const lineText = this.getLineText(buffer, y)
-            const promptMatch = detectMainPrompt(lineText, customPattern)
+                const newPos = this.getCursorPosition(buffer)
 
-            console.log(`[CommandExtraction] Scan y=${y}: "${lineText.substring(0, 50)}" prompt=${promptMatch ? 'YES' : 'no'}`)
+                // Check if position is stable (same as last reading)
+                if (lastPos && newPos.x === lastPos.x && newPos.y === lastPos.y) {
+                    stableCount++
+                    if (stableCount >= this.STABLE_READINGS) {
+                        // Position is stable
+                        clearTimeout(timeout)
+                        resolved = true
+                        if (newPos.x !== currentPos.x || newPos.y !== currentPos.y) {
+                            resolve(newPos)
+                        } else {
+                            resolve(null) // Didn't move
+                        }
+                        return
+                    }
+                } else {
+                    stableCount = 0
+                }
 
-            if (promptMatch) {
-                // Found the prompt line
-                startY = y
-                startX = promptMatch.index + promptMatch.length
-                console.log(`[CommandExtraction] Found prompt at y=${y}, startX=${startX}`)
-                break
+                lastPos = newPos
+                setTimeout(checkCursor, this.CHECK_INTERVAL)
             }
 
-            // Keep scanning - don't stop on empty lines as multi-line history commands
-            // may have empty lines as visual separators in the terminal buffer
+            // Send the control character
+            sendInput(controlChar)
+            setTimeout(checkCursor, this.CHECK_INTERVAL)
+        })
+    }
+
+    /**
+     * Get current cursor position (with absolute Y).
+     */
+    private getCursorPosition(buffer: any): CursorPosition {
+        return {
+            x: buffer.cursorX,
+            y: buffer.baseY + buffer.cursorY,
         }
-
-        // Scan FORWARD to find the end of the command
-        let endY = cursorY
-        let endX = cursorX
-
-        // For the current line, check if there's more content after cursor
-        const currentLineText = this.getLineText(buffer, cursorY)
-        if (currentLineText.length > cursorX) {
-            // There's text after the cursor on current line - use end of line
-            endX = currentLineText.trimEnd().length
-        }
-
-        // Scan forward for additional lines that are part of the command
-        for (let y = cursorY + 1; y < buffer.length && y <= cursorY + this.MAX_SCAN_LINES; y++) {
-            const lineText = this.getLineText(buffer, y)
-
-            // Stop if we hit a line with a prompt (next command)
-            if (detectMainPrompt(lineText, customPattern)) {
-                break
-            }
-
-            // Skip empty lines but don't stop (multi-line history has empty separators)
-            if (lineText.trim() === '') {
-                continue
-            }
-
-            // This line is part of the command
-            endY = y
-            endX = lineText.trimEnd().length
-        }
-
-        // Validate we found something
-        if (startY > endY || (startY === endY && startX >= endX)) {
-            return null
-        }
-
-        return { startY, startX, endY, endX }
     }
 
     /**
@@ -185,43 +294,58 @@ export class CommandExtractionService {
         buffer: any,
         boundaries: CommandBoundaries,
     ): ExtractionResult | null {
-        const { startY, startX, endY, endX } = boundaries
+        const { start, end } = boundaries
         const commandLines: string[] = []
 
-        for (let y = startY; y <= endY; y++) {
+        for (let y = start.y; y <= end.y; y++) {
             const lineText = this.getLineText(buffer, y)
 
-            // Skip empty lines (visual separators in multi-line history commands)
-            if (lineText.trim() === '' && y !== startY && y !== endY) {
-                continue
-            }
-
-            if (y === startY && y === endY) {
+            if (y === start.y && y === end.y) {
                 // Single line: from startX to endX
-                commandLines.push(lineText.substring(startX, endX))
-            } else if (y === startY) {
-                // First line: from startX to end
-                const content = lineText.substring(startX).trimEnd()
+                commandLines.push(lineText.substring(start.x, end.x))
+            } else if (y === start.y) {
+                // First line: from startX to end of line
+                const content = lineText.substring(start.x).trimEnd()
                 if (content) {
                     commandLines.push(content)
                 }
-            } else if (y === endY) {
-                // Last line: from start to endX
-                const stripped = stripContinuationPrompt(lineText)
-                const content = stripped.substring(0, Math.min(endX, stripped.length)).trimEnd()
+            } else if (y === end.y) {
+                // Last line: strip continuation prompt, then take to endX
+                const stripped = this.stripContinuationPrompt(lineText)
+                const offset = lineText.length - stripped.length
+                const adjustedEndX = Math.max(0, end.x - offset)
+                const content = stripped.substring(0, adjustedEndX).trimEnd()
                 if (content) {
                     commandLines.push(content)
                 }
             } else {
                 // Middle line: strip continuation prompt and take full line
-                const content = stripContinuationPrompt(lineText).trimEnd()
+                const content = this.stripContinuationPrompt(lineText).trimEnd()
                 if (content) {
                     commandLines.push(content)
                 }
             }
         }
 
-        const command = commandLines.join('\n').trim()
+        // Join lines, handling line continuations
+        let command = ''
+        for (let i = 0; i < commandLines.length; i++) {
+            const line = commandLines[i]
+            if (i > 0) {
+                // Check if previous line ended with \ (already trimmed, so check original)
+                const prevLine = commandLines[i - 1]
+                if (prevLine.endsWith('\\')) {
+                    // Line continuation - join with newline for display
+                    command += '\n' + line
+                } else {
+                    command += '\n' + line
+                }
+            } else {
+                command = line
+            }
+        }
+
+        command = command.trim()
 
         if (!command) {
             return null
@@ -230,69 +354,35 @@ export class CommandExtractionService {
         return {
             command,
             isMultiLine: commandLines.length > 1,
-            startLine: startY,
-            endLine: endY,
-            shellType: detectShellType(this.getLineText(buffer, startY)),
+            startLine: start.y,
+            endLine: end.y,
         }
     }
 
     /**
-     * Probe using Ctrl+A to find command start position on current line.
-     * Returns the X position after Ctrl+A, or null if probe failed.
+     * Strip common shell continuation prompts from a line.
+     * These appear in multi-line commands (heredocs, line continuations, etc.)
      */
-    private async probeCtrlA(
-        frontend: XTermFrontend,
-        sendInput: (data: string) => void,
-        originalX: number,
-    ): Promise<number | null> {
-        const buffer = frontend.xterm.buffer.active
-        const originalY = buffer.cursorY
+    private stripContinuationPrompt(line: string): string {
+        // Common continuation prompt patterns:
+        // > (bash heredoc, generic continuation)
+        // >> (PowerShell)
+        // ... (fish)
+        // dquote>, quote>, etc. (zsh)
+        const patterns = [
+            /^>\s*/,                    // > prompt
+            /^>>\s*/,                   // >> prompt
+            /^\.\.\.\s*/,               // ... prompt
+            /^(dquote|quote|bquote|pipe|cmdsubst|heredoc)>\s*/i,  // zsh prompts
+        ]
 
-        return new Promise<number | null>(resolve => {
-            let resolved = false
-            let checkCount = 0
-            const maxChecks = 10
-
-            const timeout = setTimeout(() => {
-                if (!resolved) {
-                    resolved = true
-                    resolve(null)
-                }
-            }, this.PROBE_TIMEOUT)
-
-            const checkCursor = () => {
-                if (resolved) {
-                    return
-                }
-
-                const newX = buffer.cursorX
-                const newY = buffer.cursorY
-
-                // Check if cursor moved on the same line
-                if (newY === originalY && newX !== originalX) {
-                    clearTimeout(timeout)
-                    resolved = true
-                    // Restore cursor position with Ctrl+E
-                    sendInput('\x05')
-                    resolve(newX)
-                } else if (newY !== originalY) {
-                    // Cursor moved to different line (multi-line command)
-                    clearTimeout(timeout)
-                    resolved = true
-                    // Restore cursor position with Ctrl+E
-                    sendInput('\x05')
-                    // Return 0 since we're on a different line now
-                    resolve(0)
-                } else if (checkCount < maxChecks) {
-                    checkCount++
-                    setTimeout(checkCursor, 10)
-                }
+        for (const pattern of patterns) {
+            const match = line.match(pattern)
+            if (match) {
+                return line.substring(match[0].length)
             }
-
-            // Send Ctrl+A
-            sendInput('\x01')
-            setTimeout(checkCursor, 10)
-        })
+        }
+        return line
     }
 
     /**
@@ -305,5 +395,4 @@ export class CommandExtractionService {
         }
         return line.translateToString(true)
     }
-
 }

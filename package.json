@@ -1,6 +1,6 @@
 {
   "name": "tabby-command-editor",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Rich command editor with Monaco for Tabby - edit terminal commands with syntax highlighting, multi-cursor, and find/replace",
   "keywords": [
     "tabby-plugin"

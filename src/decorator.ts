@@ -10,6 +10,9 @@ import { CommandEditorModalComponent } from './components/commandEditorModal.com
 export class CommandEditorDecorator extends TerminalDecorator {
     private hotkeySubscription: Subscription | null = null
     private activeTab: BaseTerminalTabComponent<any> | null = null
+    private isProcessing = false
+    private lastTriggerTime = 0
+    private readonly DEBOUNCE_MS = 500
 
     constructor(
         private hotkeys: HotkeysService,
@@ -40,6 +43,14 @@ export class CommandEditorDecorator extends TerminalDecorator {
                 return
             }
 
+            // Debounce and prevent concurrent execution
+            const now = Date.now()
+            if (this.isProcessing || (now - this.lastTriggerTime) < this.DEBOUNCE_MS) {
+                console.log('[CommandEditor] Debounced or already processing')
+                return
+            }
+
+            this.lastTriggerTime = now
             await this.openCommandEditor(tab)
         }))
     }
