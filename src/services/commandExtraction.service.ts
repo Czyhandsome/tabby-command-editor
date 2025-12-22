@@ -1,4 +1,5 @@
 import { Injectable } from '@angular/core'
+import { ConfigService } from 'tabby-core'
 import { XTermFrontend } from 'tabby-terminal'
 import {
     detectMainPrompt,
@@ -43,11 +44,13 @@ interface CommandBoundaries {
  */
 @Injectable()
 export class CommandExtractionService {
-    /** Timeout for Ctrl+A probe in milliseconds */
-    private readonly PROBE_TIMEOUT = 100
+    /** Timeout for Ctrl+A probe in milliseconds (increased for slower shells/SSH) */
+    private readonly PROBE_TIMEOUT = 200
 
     /** Maximum lines to scan backward for multi-line commands */
     private readonly MAX_SCAN_LINES = 100
+
+    constructor(private config: ConfigService) { }
 
     /**
      * Extract the current command from the terminal buffer.
@@ -57,7 +60,7 @@ export class CommandExtractionService {
      * @param sendInput Function to send input to the shell
      * @returns Extraction result or null if no command found
      */
-    async extractCommand (
+    async extractCommand(
         frontend: XTermFrontend,
         sendInput: (data: string) => void,
     ): Promise<ExtractionResult | null> {
@@ -102,19 +105,26 @@ export class CommandExtractionService {
     /**
      * Find command boundaries by scanning backward for prompt and forward for end.
      */
-    private findCommandBoundaries (
+    private findCommandBoundaries(
         buffer: any,
         cursorY: number,
         cursorX: number,
         probeStartX: number | null,
     ): CommandBoundaries | null {
+        // Get custom prompt pattern from config (if set)
+        const customPattern = this.config.store.commandEditor?.customPromptPattern || undefined
+
+        if (customPattern) {
+            console.log('[CommandExtraction] Using custom prompt pattern:', customPattern)
+        }
+
         // Scan BACKWARD to find the line with the main prompt
         let startY = cursorY
         let startX = probeStartX ?? 0
 
         for (let y = cursorY; y >= Math.max(0, cursorY - this.MAX_SCAN_LINES); y--) {
             const lineText = this.getLineText(buffer, y)
-            const promptMatch = detectMainPrompt(lineText)
+            const promptMatch = detectMainPrompt(lineText, customPattern)
 
             console.log(`[CommandExtraction] Scan y=${y}: "${lineText.substring(0, 50)}" prompt=${promptMatch ? 'YES' : 'no'}`)
 
@@ -146,7 +156,7 @@ export class CommandExtractionService {
             const lineText = this.getLineText(buffer, y)
 
             // Stop if we hit a line with a prompt (next command)
-            if (detectMainPrompt(lineText)) {
+            if (detectMainPrompt(lineText, customPattern)) {
                 break
             }
 
@@ -171,7 +181,7 @@ export class CommandExtractionService {
     /**
      * Extract command text from the given boundaries.
      */
-    private extractFromBoundaries (
+    private extractFromBoundaries(
         buffer: any,
         boundaries: CommandBoundaries,
     ): ExtractionResult | null {
@@ -230,7 +240,7 @@ export class CommandExtractionService {
      * Probe using Ctrl+A to find command start position on current line.
      * Returns the X position after Ctrl+A, or null if probe failed.
      */
-    private async probeCtrlA (
+    private async probeCtrlA(
         frontend: XTermFrontend,
         sendInput: (data: string) => void,
         originalX: number,
@@ -288,7 +298,7 @@ export class CommandExtractionService {
     /**
      * Get text content of a buffer line.
      */
-    private getLineText (buffer: any, lineY: number): string {
+    private getLineText(buffer: any, lineY: number): string {
         const line = buffer.getLine(lineY)
         if (!line) {
             return ''

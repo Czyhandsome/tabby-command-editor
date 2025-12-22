@@ -55,6 +55,34 @@ The default hotkey is `Ctrl+E`. You can change this in **Settings → Hotkeys �
 - ✅ Custom prompts (Starship, Powerlevel10k, Oh-My-Zsh)
 - ✅ Multi-line commands
 
+## Troubleshooting
+
+### Command includes prompt text or doesn't extract correctly
+
+If the plugin doesn't correctly detect your prompt, you can configure a custom prompt pattern:
+
+1. Open Tabby → **Settings → Config File**
+2. Add your custom prompt regex pattern:
+
+```yaml
+commandEditor:
+  customPromptPattern: '❯\s*$'  # Example for Starship prompt
+```
+
+Common patterns:
+- Starship: `❯\s*$` or `λ\s*$`
+- Powerlevel10k: `❯\s*$` or `➜\s*$`
+- Oh-My-Zsh Agnoster: `\s*$`
+- Standard Bash: `\$\s*$`
+- Custom emoji: `🚀\s*$`
+
+### Debugging
+
+Open Tabby's DevTools (Ctrl+Shift+I) and check the Console for `[CommandExtraction]` logs. This shows:
+- Current cursor position
+- Lines being scanned
+- Detected prompt positions
+
 ## Development
 
 ```bash
