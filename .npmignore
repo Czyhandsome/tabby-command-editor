@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build artifacts (included via 'files' in package.json, but ignore source maps for smaller size)
+dist/*.map
+
+# Source files (not needed in published package)
+src/
+
+# Config files
+webpack.config.mjs
+tsconfig.json
+.gitignore
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Lock files (users will use their own)
+yarn.lock
+package-lock.json

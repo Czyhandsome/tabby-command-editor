@@ -1,0 +1,16 @@
+.modal-header
+    h3.m-0 Edit Command
+    button.close(type='button', (click)='cancel()', aria-label='Close')
+        span(aria-hidden='true') ×
+
+.modal-body.p-0
+    #editorContainer(#editorContainer, style='height: 400px; width: 100%;')
+
+.modal-footer
+    .keyboard-hints.text-muted.mr-auto
+        kbd Ctrl+Enter
+        |  to apply •
+        kbd Esc
+        |  to cancel
+    button.btn.btn-secondary((click)='cancel()') Cancel
+    button.btn.btn-primary((click)='saveCommand()') Apply to Prompt
