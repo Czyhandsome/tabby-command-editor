@@ -339,61 +339,66 @@ export class CommandExtractionService {
 
     /**
      * Extract command text from the given boundaries.
+     * Handles wrapped lines (long lines that span multiple buffer rows).
      */
     private extractFromBoundaries(
         buffer: any,
         boundaries: CommandBoundaries,
     ): ExtractionResult | null {
         const { start, end } = boundaries
-        const commandLines: string[] = []
+        const segments: { text: string; isWrapped: boolean }[] = []
         const fullLines: string[] = []  // For debug logging
 
         for (let y = start.y; y <= end.y; y++) {
             const lineText = this.getLineText(buffer, y)
+            const isWrapped = this.isLineWrapped(buffer, y)
             fullLines.push(lineText)  // Store full line for debug
 
+            let content: string
             if (y === start.y && y === end.y) {
                 // Single line: from startX to endX
-                commandLines.push(lineText.substring(start.x, end.x))
+                content = lineText.substring(start.x, end.x)
             } else if (y === start.y) {
                 // First line: from startX to end of line
-                const content = lineText.substring(start.x).trimEnd()
-                if (content) {
-                    commandLines.push(content)
-                }
+                content = lineText.substring(start.x)
             } else if (y === end.y) {
-                // Last line: strip continuation prompt, then take to endX
-                const stripped = this.stripContinuationPrompt(lineText)
-                const offset = lineText.length - stripped.length
-                const adjustedEndX = Math.max(0, end.x - offset)
-                const content = stripped.substring(0, adjustedEndX).trimEnd()
-                if (content) {
-                    commandLines.push(content)
+                // Last line: take to endX
+                // Only strip continuation prompt if NOT a wrapped line
+                if (!isWrapped) {
+                    const stripped = this.stripContinuationPrompt(lineText)
+                    const offset = lineText.length - stripped.length
+                    const adjustedEndX = Math.max(0, end.x - offset)
+                    content = stripped.substring(0, adjustedEndX)
+                } else {
+                    content = lineText.substring(0, end.x)
                 }
             } else {
-                // Middle line: strip continuation prompt and take full line
-                const content = this.stripContinuationPrompt(lineText).trimEnd()
-                if (content) {
-                    commandLines.push(content)
+                // Middle line: take full line
+                // Only strip continuation prompt if NOT a wrapped line
+                if (!isWrapped) {
+                    content = this.stripContinuationPrompt(lineText)
+                } else {
+                    content = lineText
                 }
             }
+
+            segments.push({ text: content, isWrapped })
         }
 
-        // Join lines, handling line continuations
+        // Join segments: wrapped lines join directly, non-wrapped add newlines
         let command = ''
-        for (let i = 0; i < commandLines.length; i++) {
-            const line = commandLines[i]
-            if (i > 0) {
-                // Check if previous line ended with \ (already trimmed, so check original)
-                const prevLine = commandLines[i - 1]
-                if (prevLine.endsWith('\\')) {
-                    // Line continuation - join with newline for display
-                    command += '\n' + line
-                } else {
-                    command += '\n' + line
-                }
+        let hasRealMultiLine = false
+        for (let i = 0; i < segments.length; i++) {
+            const segment = segments[i]
+            if (i === 0) {
+                command = segment.text
+            } else if (segment.isWrapped) {
+                // Wrapped line - join directly without newline
+                command += segment.text
             } else {
-                command = line
+                // Actual new line (multi-line command)
+                hasRealMultiLine = true
+                command += '\n' + segment.text
             }
         }
 
@@ -407,6 +412,7 @@ export class CommandExtractionService {
         console.log('[CommandExtraction] Extracted command with prompt stripped:')
         console.log(command)
         console.log('[CommandExtraction] Boundaries: start=(' + start.x + ',' + start.y + ') end=(' + end.x + ',' + end.y + ')')
+        console.log('[CommandExtraction] Wrapped lines detected:', segments.filter(s => s.isWrapped).length)
         console.log('[CommandExtraction] ============================')
 
         if (!command) {
@@ -415,7 +421,7 @@ export class CommandExtractionService {
 
         return {
             command,
-            isMultiLine: commandLines.length > 1,
+            isMultiLine: hasRealMultiLine,
             startLine: start.y,
             endLine: end.y,
         }
@@ -456,5 +462,39 @@ export class CommandExtractionService {
             return ''
         }
         return line.translateToString(true)
+    }
+
+    /**
+     * Check if a buffer line is a wrapped continuation of the previous line.
+     * This happens when a long line exceeds the terminal width.
+     */
+    private isLineWrapped(buffer: any, lineY: number): boolean {
+        const line = buffer.getLine(lineY)
+        if (!line) {
+            return false
+        }
+        return line.isWrapped
+    }
+
+    /**
+     * Get the complete logical line starting from a given Y position,
+     * joining all wrapped segments together.
+     * Returns the text and the ending Y position.
+     */
+    private getLogicalLine(buffer: any, startY: number): { text: string; endY: number } {
+        let text = this.getLineText(buffer, startY)
+        let endY = startY
+
+        // Follow wrapped lines forward
+        for (let y = startY + 1; y < buffer.length; y++) {
+            if (this.isLineWrapped(buffer, y)) {
+                text += this.getLineText(buffer, y)
+                endY = y
+            } else {
+                break
+            }
+        }
+
+        return { text, endY }
     }
 }
