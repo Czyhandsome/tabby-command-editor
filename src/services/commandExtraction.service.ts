@@ -39,14 +39,14 @@ interface CommandBoundaries {
  */
 @Injectable()
 export class CommandExtractionService {
-    /** Timeout for readline probe in milliseconds */
-    private readonly PROBE_TIMEOUT = 300
+    /** Timeout for readline probe in milliseconds (increased for SSH latency) */
+    private readonly PROBE_TIMEOUT = 500
 
     /** Interval between cursor position checks */
-    private readonly CHECK_INTERVAL = 15
+    private readonly CHECK_INTERVAL = 25
 
     /** Number of stable readings required before accepting position */
-    private readonly STABLE_READINGS = 2
+    private readonly STABLE_READINGS = 3
 
     /** Maximum lines to scan backward for multi-line commands */
     private readonly MAX_SCAN_LINES = 50
@@ -91,7 +91,7 @@ export class CommandExtractionService {
         // Validate boundaries
         if (expandedBoundaries.start.y > expandedBoundaries.end.y ||
             (expandedBoundaries.start.y === expandedBoundaries.end.y &&
-             expandedBoundaries.start.x >= expandedBoundaries.end.x)) {
+                expandedBoundaries.start.x >= expandedBoundaries.end.x)) {
             console.log('[CommandExtraction] No command (empty boundaries)')
             return null
         }
@@ -105,6 +105,7 @@ export class CommandExtractionService {
 
     /**
      * Probe command boundaries using Ctrl+A (start) and Ctrl+E (end).
+     * Falls back to line scanning if readline probes fail.
      */
     private async probeCommandBoundaries(
         frontend: XTermFrontend,
@@ -122,10 +123,12 @@ export class CommandExtractionService {
         )
 
         if (!startPos) {
-            console.log('[CommandExtraction] Ctrl+A probe failed')
+            console.log('[CommandExtraction] Ctrl+A probe failed, trying line scan fallback')
+            // Fallback: scan current line for prompt pattern
+            return this.fallbackLineScan(buffer, originalPos)
         }
 
-        const commandStart = startPos || originalPos
+        const commandStart = startPos
 
         // Step 2: Send Ctrl+E to move to command end
         const endPos = await this.probeCursorMove(
@@ -145,6 +148,53 @@ export class CommandExtractionService {
             start: commandStart,
             end: commandEnd,
         }
+    }
+
+    /**
+     * Fallback line scanning when readline probes fail.
+     * Scans the current line for common prompt patterns and extracts command.
+     */
+    private fallbackLineScan(
+        buffer: any,
+        cursorPos: CursorPosition,
+    ): CommandBoundaries | null {
+        const lineText = this.getLineText(buffer, cursorPos.y)
+        console.log('[CommandExtraction] Fallback scan line:', JSON.stringify(lineText))
+
+        // Try to find prompt end using pattern matching
+        const promptEnd = this.findPromptEnd(lineText)
+
+        if (promptEnd !== null && promptEnd < cursorPos.x) {
+            console.log('[CommandExtraction] Fallback found prompt end at x=' + promptEnd)
+            return {
+                start: { x: promptEnd, y: cursorPos.y },
+                end: { x: lineText.trimEnd().length, y: cursorPos.y },
+            }
+        }
+
+        // Last resort: look for common prompt characters anywhere in line
+        const promptChars = ['❯', '›', '➜', '➤', '⟩', '»', '$', '#', '%', '>']
+        for (let i = lineText.length - 1; i >= 0; i--) {
+            const char = lineText[i]
+            if (promptChars.includes(char)) {
+                // Found a potential prompt character
+                // Check if there's a space after it
+                const nextChar = lineText[i + 1]
+                if (nextChar === ' ' || nextChar === undefined) {
+                    const startX = i + (nextChar === ' ' ? 2 : 1)
+                    if (startX < cursorPos.x) {
+                        console.log('[CommandExtraction] Fallback found prompt char at x=' + i)
+                        return {
+                            start: { x: startX, y: cursorPos.y },
+                            end: { x: lineText.trimEnd().length, y: cursorPos.y },
+                        }
+                    }
+                }
+            }
+        }
+
+        console.log('[CommandExtraction] Fallback: no prompt found')
+        return null
     }
 
     /**
@@ -296,9 +346,11 @@ export class CommandExtractionService {
     ): ExtractionResult | null {
         const { start, end } = boundaries
         const commandLines: string[] = []
+        const fullLines: string[] = []  // For debug logging
 
         for (let y = start.y; y <= end.y; y++) {
             const lineText = this.getLineText(buffer, y)
+            fullLines.push(lineText)  // Store full line for debug
 
             if (y === start.y && y === end.y) {
                 // Single line: from startX to endX
@@ -346,6 +398,16 @@ export class CommandExtractionService {
         }
 
         command = command.trim()
+
+        // Debug logging - show full text vs extracted command
+        const fullText = fullLines.join('\n')
+        console.log('[CommandExtraction] ========== DEBUG ==========')
+        console.log('[CommandExtraction] Full text fetched by xterm.js API (with prompt):')
+        console.log(fullText)
+        console.log('[CommandExtraction] Extracted command with prompt stripped:')
+        console.log(command)
+        console.log('[CommandExtraction] Boundaries: start=(' + start.x + ',' + start.y + ') end=(' + end.x + ',' + end.y + ')')
+        console.log('[CommandExtraction] ============================')
 
         if (!command) {
             return null
