@@ -105,7 +105,7 @@ export class CommandExtractionService {
 
     /**
      * Probe command boundaries using Ctrl+A (start) and Ctrl+E (end).
-     * Falls back to line scanning if readline probes fail.
+     * Returns null if the probe fails - we don't guess with regex.
      */
     private async probeCommandBoundaries(
         frontend: XTermFrontend,
@@ -123,9 +123,10 @@ export class CommandExtractionService {
         )
 
         if (!startPos) {
-            console.log('[CommandExtraction] Ctrl+A probe failed, trying line scan fallback')
-            // Fallback: scan current line for prompt pattern
-            return this.fallbackLineScan(buffer, originalPos)
+            // Ctrl+A didn't move cursor - either no command or shell doesn't support it
+            // We don't fallback to regex as it's unreliable
+            console.log('[CommandExtraction] Ctrl+A probe failed - no command detected')
+            return null
         }
 
         const commandStart = startPos
@@ -139,7 +140,7 @@ export class CommandExtractionService {
         )
 
         if (!endPos) {
-            console.log('[CommandExtraction] Ctrl+E probe failed')
+            console.log('[CommandExtraction] Ctrl+E probe failed, using current cursor position')
         }
 
         const commandEnd = endPos || this.getCursorPosition(buffer)
@@ -148,53 +149,6 @@ export class CommandExtractionService {
             start: commandStart,
             end: commandEnd,
         }
-    }
-
-    /**
-     * Fallback line scanning when readline probes fail.
-     * Scans the current line for common prompt patterns and extracts command.
-     */
-    private fallbackLineScan(
-        buffer: any,
-        cursorPos: CursorPosition,
-    ): CommandBoundaries | null {
-        const lineText = this.getLineText(buffer, cursorPos.y)
-        console.log('[CommandExtraction] Fallback scan line:', JSON.stringify(lineText))
-
-        // Try to find prompt end using pattern matching
-        const promptEnd = this.findPromptEnd(lineText)
-
-        if (promptEnd !== null && promptEnd < cursorPos.x) {
-            console.log('[CommandExtraction] Fallback found prompt end at x=' + promptEnd)
-            return {
-                start: { x: promptEnd, y: cursorPos.y },
-                end: { x: lineText.trimEnd().length, y: cursorPos.y },
-            }
-        }
-
-        // Last resort: look for common prompt characters anywhere in line
-        const promptChars = ['❯', '›', '➜', '➤', '⟩', '»', '$', '#', '%', '>']
-        for (let i = lineText.length - 1; i >= 0; i--) {
-            const char = lineText[i]
-            if (promptChars.includes(char)) {
-                // Found a potential prompt character
-                // Check if there's a space after it
-                const nextChar = lineText[i + 1]
-                if (nextChar === ' ' || nextChar === undefined) {
-                    const startX = i + (nextChar === ' ' ? 2 : 1)
-                    if (startX < cursorPos.x) {
-                        console.log('[CommandExtraction] Fallback found prompt char at x=' + i)
-                        return {
-                            start: { x: startX, y: cursorPos.y },
-                            end: { x: lineText.trimEnd().length, y: cursorPos.y },
-                        }
-                    }
-                }
-            }
-        }
-
-        console.log('[CommandExtraction] Fallback: no prompt found')
-        return null
     }
 
     /**
@@ -240,22 +194,17 @@ export class CommandExtractionService {
 
     /**
      * Find where the prompt ends on a line.
+     * Used only for multi-line command expansion (when scanning backward for continuations).
      * Returns the character position after the prompt, or null if no prompt found.
      */
     private findPromptEnd(line: string): number | null {
-        // Common prompt patterns - look for the prompt character followed by space
-        const promptPatterns = [
-            /^.*?[❯›➜➤⟩»$#%>]\s+/,  // Common prompt terminators
-            /^.*?[λ∴⊙⟡❮❭]\s+/,       // Starship/pure symbols
-        ]
-
-        for (const pattern of promptPatterns) {
-            const match = line.match(pattern)
-            if (match) {
-                return match[0].length
-            }
+        // Look for common prompt terminators followed by space
+        // This is a best-effort heuristic for multi-line command detection
+        const promptPattern = /^.*?[$#%>❯›➜➤⟩»λ∴⊙⟡❮❭]\s+/
+        const match = line.match(promptPattern)
+        if (match) {
+            return match[0].length
         }
-
         return null
     }
 
