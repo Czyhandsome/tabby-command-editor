@@ -138,7 +138,8 @@ export class PowerExtractionService {
         const cursorX = buffer.x
 
         // Validate this looks like a prompt position
-        if (cursorX > 100) {
+        // Only capture if cursor is very close to start (prompts are usually short)
+        if (cursorX > 50) {
             console.log('[PowerExtraction] Cursor too far right for prompt, skipping')
             return
         }
@@ -310,18 +311,23 @@ export class PowerExtractionService {
             const buffer = this.getInternalBuffer(xterm)
             if (!buffer) return
 
-            // Only capture if cursor is at reasonable position
-            if (buffer.x < 100) {
+            // Only capture if cursor is at reasonable position (typical prompt < 20 chars)
+            if (buffer.x < 20) {
                 this.capturePromptPosition(terminalId, xterm)
             }
         }, this.PROMPT_DETECT_DELAY)
     }
 
     private looksLikePrompt(text: string): boolean {
+        // Prompt must END with a prompt char followed by optional space
+        // e.g., "❯ " or "$ " or "user@host:~$ "
         const promptChars = ['❯', '›', '➜', '➤', '⟩', '»', '$', '#', '%', '>']
         const trimmed = text.trimEnd()
         if (trimmed.length === 0) return false
-        return promptChars.some(c => trimmed.includes(c))
+
+        // Check if the last non-space char is a prompt char
+        const lastChar = trimmed[trimmed.length - 1]
+        return promptChars.includes(lastChar)
     }
 
     private findPromptEnd(text: string): number {
