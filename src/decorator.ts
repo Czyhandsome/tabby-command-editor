@@ -3,7 +3,7 @@ import { Subscription } from 'rxjs'
 import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
 import { ConfigService, HotkeysService, NotificationsService, TranslateService } from 'tabby-core'
 import { TerminalDecorator, BaseTerminalTabComponent, XTermFrontend } from 'tabby-terminal'
-import { CommandExtractionService, ExtractionResult } from './services/commandExtraction.service'
+import { PowerExtractionService, PowerExtractionResult } from './services/powerExtraction.service'
 import { CommandEditorModalComponent } from './components/commandEditorModal.component'
 
 @Injectable()
@@ -14,13 +14,19 @@ export class CommandEditorDecorator extends TerminalDecorator {
     private lastTriggerTime = 0
     private readonly DEBOUNCE_MS = 500
 
+    /** Counter for generating unique terminal IDs */
+    private terminalIdCounter = 0
+
+    /** Map of tab to terminal ID */
+    private tabTerminalIds = new WeakMap<BaseTerminalTabComponent<any>, string>()
+
     constructor(
         private hotkeys: HotkeysService,
         private ngbModal: NgbModal,
         private notifications: NotificationsService,
         private translate: TranslateService,
         private config: ConfigService,
-        private commandExtraction: CommandExtractionService,
+        private powerExtraction: PowerExtractionService,
     ) {
         super()
     }
@@ -31,6 +37,18 @@ export class CommandEditorDecorator extends TerminalDecorator {
         }
 
         this.activeTab = tab
+
+        // Generate unique terminal ID for this tab
+        const terminalId = `terminal-${++this.terminalIdCounter}`
+        this.tabTerminalIds.set(tab, terminalId)
+
+        // Attach power extraction for prompt tracking
+        const extractionDisposable = this.powerExtraction.attach(terminalId, tab.frontend.xterm)
+
+        // Clean up when tab is destroyed
+        this.subscribeUntilDetached(tab, tab.destroyed$.subscribe(() => {
+            extractionDisposable.dispose()
+        }))
 
         // Subscribe to hotkeys
         this.subscribeUntilDetached(tab, this.hotkeys.hotkey$.subscribe(async hotkey => {
@@ -55,6 +73,7 @@ export class CommandEditorDecorator extends TerminalDecorator {
         }))
     }
 
+
     private async openCommandEditor(tab: BaseTerminalTabComponent<any>): Promise<void> {
         if (!tab.session) {
             return
@@ -65,10 +84,17 @@ export class CommandEditorDecorator extends TerminalDecorator {
             return
         }
 
-        // Extract current command using keyboard-based detection
-        const extractionResult = await this.commandExtraction.extractCommand(
-            tab.frontend,
-            (data: string) => tab.sendInput(data),
+        // Get terminal ID for this tab
+        const terminalId = this.tabTerminalIds.get(tab)
+        if (!terminalId) {
+            console.error('[CommandEditor] Terminal ID not found for tab')
+            return
+        }
+
+        // Extract current command using Power Extraction (no escape sequences!)
+        const extractionResult = this.powerExtraction.extractCommand(
+            terminalId,
+            tab.frontend.xterm,
         )
 
         if (!extractionResult || !extractionResult.command.trim()) {
@@ -163,7 +189,7 @@ export class CommandEditorDecorator extends TerminalDecorator {
      * Clear the current command from the terminal.
      * For multiline commands, uses ANSI escape sequences to clean up visually.
      */
-    private async clearCurrentCommand(tab: BaseTerminalTabComponent<any>, extractionResult: ExtractionResult): Promise<void> {
+    private async clearCurrentCommand(tab: BaseTerminalTabComponent<any>, extractionResult: PowerExtractionResult): Promise<void> {
         if (!(tab.frontend instanceof XTermFrontend)) {
             return
         }
@@ -193,3 +219,4 @@ export class CommandEditorDecorator extends TerminalDecorator {
         }
     }
 }
+

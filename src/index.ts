@@ -8,7 +8,7 @@ import { TerminalDecorator } from 'tabby-terminal'
 import { CommandEditorConfigProvider } from './config'
 import { CommandEditorHotkeyProvider } from './hotkeys'
 import { CommandEditorDecorator } from './decorator'
-import { CommandExtractionService } from './services/commandExtraction.service'
+import { PowerExtractionService } from './services/powerExtraction.service'
 import { CommandEditorModalComponent } from './components/commandEditorModal.component'
 
 @NgModule({
@@ -18,7 +18,7 @@ import { CommandEditorModalComponent } from './components/commandEditorModal.com
         ToastrModule,
     ],
     providers: [
-        CommandExtractionService,
+        PowerExtractionService,
         { provide: ConfigProvider, useClass: CommandEditorConfigProvider, multi: true },
         { provide: HotkeyProvider, useClass: CommandEditorHotkeyProvider, multi: true },
         { provide: TerminalDecorator, useClass: CommandEditorDecorator, multi: true },
@@ -27,7 +27,8 @@ import { CommandEditorModalComponent } from './components/commandEditorModal.com
         CommandEditorModalComponent,
     ],
 })
-export default class CommandEditorModule {}
+export default class CommandEditorModule { }
 
-export { CommandExtractionService }
+export { PowerExtractionService, PowerExtractionResult } from './services/powerExtraction.service'
 export { CommandEditorModalComponent }
+
